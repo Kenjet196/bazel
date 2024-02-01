@@ -250,7 +250,7 @@ class BazelVendorTest(test_base.TestBase):
     self.assertNotIn('_main~ext~localRepo', repos_vendored)
     self.assertNotIn('_main~ext~configRepo', repos_vendored)
 
-  def testOutOfDateVendoredRepo(self):
+  def testBuildingOutOfDateVendoredRepo(self):
     self.ScratchFile(
         'MODULE.bazel',
         [
@@ -329,10 +329,86 @@ class BazelVendorTest(test_base.TestBase):
         "WARNING: <builtin>: Vendored repository '_main~ext~justRepo' is"
         ' out-of-date. The up-to-date version will be fetched into the external'
         ' cache and used. To update the repo in the  vendor directory, run'
-        " 'bazel vendor' with the directory flag",
+        " 'bazel vendor'",
         stderr,
     )
 
+  def testBuildingVendoredRepoInOfflineMode(self):
+    self.ScratchFile(
+      'MODULE.bazel',
+      [
+        'ext = use_extension("extension.bzl", "ext")',
+        'use_repo(ext, "venRepo")',
+      ],
+    )
+    self.ScratchFile(
+      'extension.bzl',
+      [
+        'def _repo_rule_impl(ctx):',
+        '    ctx.file("WORKSPACE")',
+        '    ctx.file("BUILD", "filegroup(name=\'lala\')")',
+        'repo_rule = repository_rule(implementation=_repo_rule_impl)',
+        '',
+        'def _ext_impl(ctx):',
+        '    repo_rule(name="venRepo")',
+        'ext = module_extension(implementation=_ext_impl)',
+      ],
+    )
+    self.ScratchFile('BUILD')
+
+    # Vendor, assert and build with no problems
+    self.RunBazel(['vendor', '--vendor_dir=vendor'])
+    self.assertIn('_main~ext~venRepo', os.listdir(self._test_cwd + '/vendor'))
+
+    # Make updates in repo definition
+    self.ScratchFile(
+      'MODULE.bazel',
+      [
+        'ext = use_extension("extension.bzl", "ext")',
+        'use_repo(ext, "venRepo")',
+        'use_repo(ext, "noVenRepo")',
+      ],
+    )
+    self.ScratchFile(
+      'extension.bzl',
+      [
+        'def _repo_rule_impl(ctx):',
+        '    ctx.file("WORKSPACE")',
+        '    ctx.file("BUILD", "filegroup(name=\'haha\')")',
+        'repo_rule = repository_rule(implementation=_repo_rule_impl)',
+        '',
+        'def _ext_impl(ctx):',
+        '    repo_rule(name="venRepo")',
+        '    repo_rule(name="noVenRepo")',
+        'ext = module_extension(implementation=_ext_impl)',
+      ],
+    )
+
+    # Building a repo that is not vendored in offline mode, should fail
+    _, _, stderr = self.RunBazel(
+      ['build', '@noVenRepo//:all', '--vendor_dir=vendor', '--nofetch'],
+      allow_failure=True
+    )
+    self.assertIn(
+      "ERROR: Vendored repository _main~ext~noVenRepo not found under the"
+      " vendor directory and fetching is disabled. To fix run 'bazel"
+      " vendor' or build without the '--nofetch'",
+      stderr,
+    )
+
+    # Building out-of-date repo in offline mode, should build the out-dated one
+    # and emit a warning
+    _, stdout, stderr = self.RunBazel(
+      ['build', '@venRepo//:all', '--vendor_dir=vendor', '--nofetch'],
+    )
+    self.assertIn(
+      "WARNING: <builtin>: Vendored repository '_main~ext~venRepo' is"
+      " out-to-date and fetching is disabled. Run build without the '--nofetch'"
+      " option or to update it, run `bazel vendor`",
+      stderr,
+    )
+    # Assert the out-dated repo is the one built with
+    self.assertIn("Target @@_main~ext~venRepo//:lala up-to-date (nothing to build)", stderr)
 
 if __name__ == '__main__':
   absltest.main()
